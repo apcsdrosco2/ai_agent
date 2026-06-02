@@ -1,0 +1,15 @@
+# Web Framework for the UI
+streamlit==1.32.0
+
+# Database Client
+supabase==2.3.4
+
+# AI and Scraping Tools
+google-genai
+requests==2.31.0
+
+# Data Management
+pandas==2.2.1
+
+# Environment Variable Loader
+python-dotenv==1.0.1
