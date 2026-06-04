@@ -1,239 +1,128 @@
-import streamlit as st
-import pandas as pd
-import requests
-import urllib.parse
-import json
 import os
-from datetime import datetime
+import streamlit as st
 from dotenv import load_dotenv
-from supabase import create_client, Client
-import google.generativeai as genai
 
-# --- 1. App Configuration (MUST BE FIRST) ---
-st.set_page_config(page_title="AI Job Agent", page_icon="🤖", layout="wide")
-
-# --- 2. Environment & API Initialization ---
+# Load environment variables from .env file
 load_dotenv()
 
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_KEY")
-try:
-    supabase_client: Client = create_client(supabase_url, supabase_key)
-except Exception:
-    supabase_client = None
+# Import the function in agent.py
+from agent import generate_meal_plan 
+from supabase import create_client, Client
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-# We use gemini-1.5-flash because it is fast and we configure it to strictly output JSON
-model = genai.GenerativeModel(
-    'gemini-1.5-flash',
-    generation_config={"response_mime_type": "application/json"}
-)
-SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
+# Initialize Supabase client
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# --- 3. Session State & Folder Initialization (THIS PREVENTS YOUR ERROR) ---
-if 'messages' not in st.session_state:
-    st.session_state['messages'] = [{"role": "assistant", "content": "Hello! I am your AI Job Agent. Tell me what role and location you are looking for (e.g., 'Find Data Analyst roles in Taguig')."}]
-if 'user_skills' not in st.session_state:
-    st.session_state['user_skills'] = ["Python", "SQL", "Tableau", "Power BI", "Excel", "R"]
-if not os.path.exists("saved_csvs"):
-    os.makedirs("saved_csvs")
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+else:
+    supabase = None
 
-# --- 4. Backend Agent Functions ---
+# Set up the UI layout
+st.set_page_config(page_title="Sangkap AI", page_icon="🍳")
 
-def extract_search_params(prompt_text):
-    """Uses Gemini to extract the job role and location directly from the user's chat message."""
-    prompt = f"""
-    Extract the target job role and location from this user request: "{prompt_text}"
-    If no location is mentioned, default to "Metro Manila".
-    If it does not sound like a job search request, return empty strings.
-    Format output STRICTLY as JSON: {{"role": "Data Analyst", "location": "Taguig"}}
-    """
-    try:
-        response = model.generate_content(prompt)
-        return json.loads(response.text)
-    except Exception as e:
-        # If this fails now, we will see exactly why!
-        st.error(f"Gemini API Error: {e}")
-        return {"role": "", "location": ""}
+# Initialize session state for selected recipe
+if "selected_recipe" not in st.session_state:
+    st.session_state.selected_recipe = None
 
-def get_job_urls_from_google(role, location):
-    query = f'site:jobstreet.com.ph OR site:indeed.com "{role}" "{location}" "apply"'
-    url = f"https://serpapi.com/search.json?q={urllib.parse.quote(query)}&api_key={SERPAPI_KEY}"
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        return [result['link'] for result in response.json().get('organic_results', [])]
-    except requests.exceptions.RequestException as e:
-        st.error(f"Search API Error: {e}")
-        return []
-
-def filter_new_urls(url_list):
-    if not url_list or not supabase_client: return url_list
-    try:
-        response = supabase_client.table("processed_jobs").select("url").in_("url", url_list).execute()
-        existing_urls = {row['url'] for row in response.data}
-        return [url for url in url_list if url not in existing_urls]
-    except Exception:
-        return url_list 
-
-def scrape_with_firecrawl(url):
-    headers = {"Authorization": f"Bearer {FIRECRAWL_API_KEY}", "Content-Type": "application/json"}
-    payload = {"url": url, "formats": ["markdown"]}
-    try:
-        response = requests.post("https://api.firecrawl.dev/v1/scrape", json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json().get("data", {}).get("markdown", "")
-    except Exception:
-        return ""
-
-def analyze_job_description(markdown_text, user_skills):
-    """Uses Gemini with Chain-of-Thought reasoning to evaluate the job."""
-    if not markdown_text: return None
-    
-    prompt = f"""
-    You are a technical career assistant evaluating a job posting. 
-    User's target skills: {', '.join(user_skills)}
-    Job Description: {markdown_text[:3000]}
-    
-    Use Chain-of-Thought reasoning.
-    1. Identify Job Title, Company, Location.
-    2. Identify all technical skills required.
-    3. Compare to User's target skills.
-    4. Assign a "match_score" (0 to 100).
-    
-    Format STRICTLY as JSON: {{"title": "...", "company": "...", "location": "...", "tech_skills_found": "...", "reasoning": "...", "match_score": 85}}
-    """
-    try:
-        response = model.generate_content(prompt)
-        return json.loads(response.text)
-    except Exception:
-        return None
-
-def save_job_to_memory(url, title, company):
-    if not supabase_client: return
-    try:
-        supabase_client.table("processed_jobs").insert({"url": url, "job_title": title, "company_name": company}).execute()
-    except:
-        pass
-
-
-# --- 5. Frontend UI Routing ---
-st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["💬 Chat with JobSearch AI", "📁 Generated CSVs", "📄 My Resume & Skills"])
-st.sidebar.markdown("---")
-
-
-# ==========================================
-# TAB 1: Main Chatbot Interface
-# ==========================================
-if page == "💬 Chat with JobSearch AI":
-    st.title("🤖 Job Search AI Assistant")
-    
-    for message in st.session_state['messages']:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    if prompt := st.chat_input("E.g., Find me Data Analyst roles in Taguig requiring Python and SQL"):
-        
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        st.session_state['messages'].append({"role": "user", "content": prompt})
-        
-        with st.chat_message("assistant"):
-            search_params = extract_search_params(prompt)
-            role = search_params.get("role")
-            location = search_params.get("location")
+# Sidebar: Recipe History
+with st.sidebar:
+    st.header("📜 Recipe History")
+    if supabase:
+        try:
+            # Fetch the latest 20 successful recipes from Supabase
+            response = supabase.table("recipes").select("*").eq("is_valid_ingredients", True).order("created_at", desc=True).limit(20).execute()
+            recipes_data = response.data
             
-            if role:
-                with st.spinner(f"Agent Action: Searching web for {role} in {location}..."):
-                    raw_urls = get_job_urls_from_google(role, location)
-                    new_urls = filter_new_urls(raw_urls)
-                    
-                    if new_urls:
-                        final_results = []
-                        progress_bar = st.progress(0)
-                        
-                        for index, url in enumerate(new_urls):
-                            markdown = scrape_with_firecrawl(url)
-                            parsed_data = analyze_job_description(markdown, st.session_state['user_skills'])
-                            
-                            if parsed_data and parsed_data.get('match_score', 0) > 40:
-                                parsed_data['url'] = url
-                                final_results.append(parsed_data)
-                                save_job_to_memory(url, parsed_data.get('title', 'Unknown'), parsed_data.get('company', 'Unknown'))
-                                
-                            progress_bar.progress((index + 1) / len(new_urls))
-                        
-                        progress_bar.empty()
-                        
-                        if final_results:
-                            df = pd.DataFrame(final_results)
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            safe_role = role.replace(" ", "_")
-                            filename = f"jobs_{safe_role}_{timestamp}.csv"
-                            df.to_csv(os.path.join("saved_csvs", filename), index=False)
-                            
-                            response_text = f"I scanned the web and found **{len(final_results)}** new postings matching your profile! I have saved the details to the **Generated CSVs** tab."
-                            st.markdown(response_text)
-                            st.dataframe(df[['title', 'company', 'location', 'match_score', 'url']], column_config={"url": st.column_config.LinkColumn("Apply")})
-                        else:
-                            response_text = "I processed the latest postings, but none scored high enough to match your skills today."
-                            st.markdown(response_text)
-                    else:
-                        response_text = "No new job URLs found today. Filtered out duplicates via database memory."
-                        st.markdown(response_text)
+            if recipes_data:
+                # Display the recipes as buttons in the sidebar
+                for i, r_data in enumerate(recipes_data):
+                    if st.button(r_data.get("recipe_name", "Recipe"), key=f"hist_{r_data.get('id', i)}", use_container_width=True):
+                        st.session_state.selected_recipe = r_data
             else:
-                response_text = "I'm ready! Just give me a job title and a location to start searching."
-                st.markdown(response_text)
-                
-        st.session_state['messages'].append({"role": "assistant", "content": response_text})
-
-
-# ==========================================
-# TAB 2: Generated CSV Repository
-# ==========================================
-elif page == "📁 Generated CSVs":
-    st.title("📁 Saved Job Matches")
-    st.write("Access your daily compiled job postings here.")
-    
-    csv_files = [f for f in os.listdir("saved_csvs") if f.endswith('.csv')]
-    
-    if not csv_files:
-        st.info("No CSVs generated yet. Run a search in the chat to create one!")
+                st.info("No past recipes yet. Generate your first one!")
+        except Exception as e:
+            st.error(f"Could not load history: {e}")
     else:
-        for file in sorted(csv_files, reverse=True): 
-            file_path = os.path.join("saved_csvs", file)
-            df = pd.read_csv(file_path)
-            
-            with st.expander(f"📄 {file}"):
-                st.dataframe(df)
-                with open(file_path, "rb") as f:
-                    st.download_button(label=f"Download {file}", data=f, file_name=file, mime="text/csv", key=file)
+        st.info("Set up Supabase to remember past recipes!")
 
+st.title("🍳 Sangkap AI")
+st.write("Tell me what ingredients you have, and I'll generate a structured recipe for you.")
 
-# ==========================================
-# TAB 3: Resume & Skill Context
-# ==========================================
-elif page == "📄 My Resume & Skills":
-    st.title("📄 Job Profile")
-    st.write("Update your core skills so the agent knows exactly what you are capable of.")
-    
-    st.subheader("Current Core Skills")
-    updated_skills = st.multiselect(
-        "Edit the technical skills the agent should match against:",
-        ["Python", "SQL", "Tableau", "Power BI", "Excel", "R", "C++", "Apex", "React"],
-        default=st.session_state['user_skills']
-    )
-    
-    if updated_skills != st.session_state['user_skills']:
-        st.session_state['user_skills'] = updated_skills
-        st.success("Skills updated! The agent will use this new context for future searches.")
+# Create a container for the results to place them above the input
+results_container = st.container()
+
+# User input box
+user_ingredients = st.text_input("What's in your pantry?", placeholder="e.g., Eggs, rice, soy sauce, old spinach")
+
+# Option for number of people
+num_people = st.selectbox("How many people are you cooking for?", ["1 person", "2 people", "3 people", "Many people (4+)"])
+
+# Trigger the agent
+if st.button("Generate Meal"):
+    if user_ingredients:
+        with results_container:
+            with st.spinner("The AI is analyzing your ingredients..."):
+                try:
+                    # Call the agent
+                    recipe = generate_meal_plan(user_ingredients, num_people)
+                    
+                    if recipe.is_valid_ingredients:
+                        db_record = recipe.model_dump()
+                        db_record["pantry_ingredients"] = user_ingredients
+                        db_record["num_people"] = num_people
+                        
+                        # Save to Supabase memory
+                        if supabase:
+                            try:
+                                supabase.table("recipes").insert(db_record).execute()
+                            except Exception as db_error:
+                                st.error(f"Failed to save recipe to database: {db_error}")
+                                
+                        # Update session state with the new recipe
+                        st.session_state.selected_recipe = db_record
+                    else:
+                        st.warning(recipe.recipe_name)
+                except Exception as e:
+                    error_msg = str(e)
+                    if "503" in error_msg or "UNAVAILABLE" in error_msg:
+                        st.warning("The AI servers are currently experiencing high demand. Please wait a few seconds and try again!")
+                    elif "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                        st.warning("You've hit the AI's rate limit! Please wait a little while before asking for another recipe.")
+                    else:
+                        st.warning("Oops! I couldn't generate a recipe from that. Please try entering actual food items.")
+                        st.error(f"Developer Details: {e}")
+    else:
+        st.warning("Please enter some ingredients first!")
+
+# Display the selected recipe (either newly generated or from history)
+if st.session_state.selected_recipe:
+    with results_container:
+        r = st.session_state.selected_recipe
         
-    st.markdown("---")
-    st.subheader("Upload Resume (PDF)")
-    uploaded_file = st.file_uploader("Upload a PDF to automatically extract skills (Coming Soon).", type=["pdf"])
-    
-    if uploaded_file is not None:
-        with st.spinner("Agent is reading your resume..."):
-            st.success("Resume uploaded successfully! (PDF Parsing Logic can be added here)")
+        st.success(f"**{r.get('recipe_name')}**")
+        
+        with st.expander("🧠 Sangkap AI's Reasoning"):
+            st.write(r.get("reasoning"))
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"⏱️ **Prep Time:** {r.get('prep_time_minutes', 0)} mins")
+            st.write(f"🔥 **Estimated Calories:** {r.get('estimated_calories', 0)} kcal")
+            st.write(f"🍽️ **Estimated Servings:** {r.get('estimated_servings', 0)}")
+            st.write("✅ **Using what you have:**")
+            for item in r.get('used_ingredients', []):
+                st.write(f"- {item}")
+        
+        with col2:
+            st.write("🛒 **Quick Shopping List:**")
+            for item in r.get('missing_ingredients_to_buy', []):
+                st.write(f"- {item}")
+                
+            st.write("---")
+            st.write("📝 **Instructions:**")
+            for i, step in enumerate(r.get('instructions', []), 1):
+                st.write(f"**Step {i}:** {step}")
+
+st.markdown("---")
+st.caption("⚠️ **Disclaimer:** These recipes are generated by Artificial Intelligence. Please use your best judgment regarding food safety, cooking temperatures, and dietary restrictions or allergies. AI can make mistakes!")
