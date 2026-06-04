@@ -80,6 +80,7 @@ streamlit run app.py
 ---
 
 ### Agent Design
+```text
 [ USER PERCEPTION ]
   ┌──────────────────────────┐
   │ 1. Messy Ingredient Text │
@@ -108,10 +109,12 @@ streamlit run app.py
   ┌──────────────────────────────────────────────────┐
   │  Validated, Fluff-Free JSON Recipe Dashboard     │
   └──────────────────────────────────────────────────┘
+```
 
 
 ### System Architecture
 
+```text
 [ User Input (Streamlit UI) ]
             │
             ▼
@@ -136,3 +139,4 @@ streamlit run app.py
             │                     │
             ▼                     ▼
 [ Final Recipe Dashboard ] <──[ Sidebar History UI ]
+```
